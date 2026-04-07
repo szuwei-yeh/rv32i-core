@@ -92,6 +92,8 @@ PASS=0
 FAIL=0
 SKIP=0
 declare -a RESULTS=()
+total_cycles=0
+total_instrs=0
 
 for name in "${TESTS[@]}"; do
     src="$ISA/rv32ui/${name}.S"
@@ -136,6 +138,10 @@ for name in "${TESTS[@]}"; do
         PASS)
             RESULTS+=("PASS  $name")
             PASS=$((PASS + 1))
+            cyc=$(echo "$result" | grep -E '^PASS' | grep -oE '[0-9]+ cycles' | awk '{print $1}')
+            ins=$(echo "$result" | grep -E '^PASS' | grep -oE '[0-9]+ instrs'  | awk '{print $1}')
+            [[ -n "$cyc" ]] && total_cycles=$((total_cycles + cyc))
+            [[ -n "$ins" ]] && total_instrs=$((total_instrs + ins))
             ;;
         FAIL)
             RESULTS+=("FAIL  $name")
@@ -162,6 +168,10 @@ for r in "${RESULTS[@]}"; do
 done
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  PASS: $PASS / $TOTAL   FAIL: $FAIL   SKIP: $SKIP"
+if [ "$total_instrs" -gt 0 ]; then
+    avg_cpi=$(awk "BEGIN{printf \"%.3f\", $total_cycles / $total_instrs}")
+    echo "  Avg CPI (PASS only): $avg_cpi  ($total_cycles cycles / $total_instrs instrs)"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$FAIL" -eq 0 ]; then

@@ -62,6 +62,17 @@ module tb_riscv_tests;
         end
     end
 
+    // ── Instruction counter ───────────────────────────────────────────────
+    // Count every cycle where a non-bubble enters the EX stage.
+    // Bubbles are indicated by id_ex_flush=1 (load-use stall or branch flush).
+    // Since there is no flush after EX (ex_mem_reg flush is tied to 1'b0),
+    // every non-bubble that enters EX is guaranteed to retire at WB.
+    integer instr_count;
+    always @(posedge clk) begin
+        if (rst_n && !dut.id_ex_flush)
+            instr_count = instr_count + 1;
+    end
+
     // ── Main test driver ──────────────────────────────────────────────────
     reg [1023:0] test_name;
     integer      cycle_count;
@@ -72,6 +83,7 @@ module tb_riscv_tests;
             test_name = "unknown";
 
         cycle_count = 0;
+        instr_count = 0;
 
         // Reset for 4 clock cycles
         rst_n = 0;
@@ -87,19 +99,22 @@ module tb_riscv_tests;
 
             // Only trigger on a definite non-zero write
             if (tohost_val === 32'h1) begin
-                $display("PASS  %-24s  (%0d cycles)", test_name, cycle_count);
+                $display("PASS  %-24s  (%0d cycles, %0d instrs, CPI=%0.2f)",
+                         test_name, cycle_count, instr_count,
+                         $itor(cycle_count) / $itor(instr_count));
                 $finish;
             end else if (tohost_val[0] === 1'b1) begin
                 // tohost = (failing_testnum << 1) | 1
-                $display("FAIL  %-24s  test_case=%0d  tohost=0x%08h",
-                         test_name, tohost_val >> 1, tohost_val);
+                $display("FAIL  %-24s  test_case=%0d  tohost=0x%08h  (%0d cycles, %0d instrs)",
+                         test_name, tohost_val >> 1, tohost_val,
+                         cycle_count, instr_count);
                 $finish;
             end
         end
 
         // Reached here → timeout
-        $display("TIMEOUT %-24s  (%0d cycles, tohost=0x%08h)",
-                 test_name, cycle_count, dut.u_dmem.mem[TOHOST_WORD]);
+        $display("TIMEOUT %-24s  (%0d cycles, %0d instrs, tohost=0x%08h)",
+                 test_name, cycle_count, instr_count, dut.u_dmem.mem[TOHOST_WORD]);
         $finish;
     end
 
