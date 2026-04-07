@@ -8,8 +8,9 @@ module core_top #(
     parameter DATA_WIDTH = 32,
     parameter ADDR_WIDTH = 32
 )(
-    input  wire clk,
-    input  wire rst_n
+    input  wire        clk,
+    input  wire        rst_n,
+    output wire [31:0] debug_pc       // current IF-stage PC (for debug / ILA)
 );
     // =========================================================
     // Wire declarations
@@ -19,6 +20,9 @@ module core_top #(
     wire [ADDR_WIDTH-1:0] if_pc;
     wire [ADDR_WIDTH-1:0] if_pc4;
     wire [DATA_WIDTH-1:0] if_instr;
+
+    // debug_pc — direct view of the IF-stage program counter
+    assign debug_pc = if_pc;
 
     // IF/ID register outputs (ID stage inputs)
     wire [ADDR_WIDTH-1:0] id_pc;
