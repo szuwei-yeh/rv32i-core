@@ -31,8 +31,9 @@ module hazard_unit (
     input  wire [4:0]  id_ex_rs2,
 
     // Branch/jump redirect signals (from EX stage)
-    input  wire        mispredicted, // branch/JAL prediction was wrong → flush 2 stages
+    input  wire        mispredicted, // registered any_correction (flush_r) → timing-safe, for IF/ID flush
     input  wire        ex_jalr,      // JALR always needs redirect (not predicted)
+    input  wire        id_ex_kill,   // combinational any_correction → kills ID/EX in cycle N (1 cycle early)
 
     // Cache stall inputs
     input  wire        icache_stall,   // I$ miss — stall IF
@@ -76,10 +77,15 @@ module hazard_unit (
     // dcache_stall defers branch flush (entire pipeline frozen); icache_stall does not.
     assign if_id_flush  = flush_pipeline && !load_use_hazard && !dcache_stall;
 
-    // ID/EX flush: bubble on load-use / icache miss, or branch redirect
-    //              (but NOT when dcache_stall is freezing that register)
+    // ID/EX flush: bubble on load-use / icache miss, or branch redirect.
+    // id_ex_kill = any_correction (combinational) fires in cycle N to prevent the
+    // instruction immediately after a mispredicted branch from reaching EX.
+    // flush_pipeline (= flush_r, registered) fires in cycle N+1 to clean up the
+    // wrong-path instruction that entered IF/ID during the 1-cycle PC-redirect gap.
+    // Together they form a dual-cycle kill without touching IF/ID CE in cycle N
+    // (preserving the timing-safe flush_r → IF/ID CE path).
     assign id_ex_flush  = (load_use_hazard || icache_stall) ||
-                          (flush_pipeline && !dcache_stall);
+                          ((flush_pipeline || id_ex_kill) && !dcache_stall);
 
     // D$-miss outputs: freeze entire pipeline up to and including MEM/WB.
     // MEM/WB is STALLED (not flushed) so the instruction in WB keeps its forwarding

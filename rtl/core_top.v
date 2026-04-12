@@ -540,8 +540,9 @@ module core_top #(
         .if_id_rs2     (id_rs2_addr),
         .id_ex_rs1     (ex_rs1_addr),
         .id_ex_rs2     (ex_rs2_addr),
-        .mispredicted  (any_correction | flush_r), // dual-cycle flush: cycle N kills EX candidate,
-        .ex_jalr       (1'b0),                    //   cycle N+1 (flush_r) kills the wrong-path IF fetch
+        .mispredicted  (flush_r),        // registered: drives if_id_flush / pc_stall (timing-safe)
+        .id_ex_kill    (any_correction), // combinational: kills ID/EX in cycle N only (short path to ID/EX CE)
+        .ex_jalr       (1'b0),
         .icache_stall  (icache_stall),
         .dcache_stall  (dcache_stall),
         .pc_stall      (pc_stall),
