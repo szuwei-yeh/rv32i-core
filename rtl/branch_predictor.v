@@ -57,7 +57,37 @@ module branch_predictor #(
     wire [IDX_BITS-1:0] ex_idx = ex_pc[IDX_BITS+1 : 2];
     wire [TAG_BITS-1:0] ex_tag = ex_pc[ADDR_WIDTH-1 : IDX_BITS+2];
 
-    // ── Sequential logic ──────────────────────────────────────────────────────
+    // ── EX-update pipeline stage (timing optimisation) ────────────────────────
+    // Critical path: forwarding → ALU → ex_branch_taken → BTB CE ≈ 14.3 ns.
+    // Registering all update signals by 1 clock breaks the ALU→CE path at the
+    // cost of writing the BTB one cycle later — no functional impact because
+    // the instruction that caused the update has already left EX by then.
+    reg                  update_en_r;
+    reg                  taken_r;
+    reg [IDX_BITS-1:0]   idx_r;
+    reg [TAG_BITS-1:0]   tag_r;
+    reg [ADDR_WIDTH-1:0] target_r;
+    reg                  mispredicted_r;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            update_en_r    <= 1'b0;
+            taken_r        <= 1'b0;
+            idx_r          <= {IDX_BITS{1'b0}};
+            tag_r          <= {TAG_BITS{1'b0}};
+            target_r       <= {ADDR_WIDTH{1'b0}};
+            mispredicted_r <= 1'b0;
+        end else begin
+            update_en_r    <= ex_update_en;
+            taken_r        <= ex_taken;
+            idx_r          <= ex_idx;
+            tag_r          <= ex_tag;
+            target_r       <= ex_target;
+            mispredicted_r <= ex_mispredicted;
+        end
+    end
+
+    // ── Sequential logic (uses registered update signals) ─────────────────────
     integer i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -70,20 +100,20 @@ module branch_predictor #(
             branch_count     <= 32'b0;
             mispredict_count <= 32'b0;
         end else begin
-            if (ex_update_en) begin
+            if (update_en_r) begin
                 branch_count <= branch_count + 1;
-                if (ex_mispredicted)
+                if (mispredicted_r)
                     mispredict_count <= mispredict_count + 1;
 
                 // Update 2-bit saturating counter
-                if (ex_taken) begin
-                    if (bht[ex_idx] != 2'b11) bht[ex_idx] <= bht[ex_idx] + 1;
+                if (taken_r) begin
+                    if (bht[idx_r] != 2'b11) bht[idx_r] <= bht[idx_r] + 1;
                     // Allocate / refresh BTB entry on taken
-                    btb_valid[ex_idx]  <= 1'b1;
-                    btb_tag[ex_idx]    <= ex_tag;
-                    btb_target[ex_idx] <= ex_target;
+                    btb_valid[idx_r]  <= 1'b1;
+                    btb_tag[idx_r]    <= tag_r;
+                    btb_target[idx_r] <= target_r;
                 end else begin
-                    if (bht[ex_idx] != 2'b00) bht[ex_idx] <= bht[ex_idx] - 1;
+                    if (bht[idx_r] != 2'b00) bht[idx_r] <= bht[idx_r] - 1;
                     // Do NOT invalidate BTB on not-taken; keep last-known target
                 end
             end
