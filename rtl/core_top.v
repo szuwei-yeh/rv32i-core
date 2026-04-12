@@ -132,6 +132,7 @@ module core_top #(
     wire        id_ex_stall;
     wire        ex_mem_stall;
     wire        mem_wb_flush;
+    wire        mem_wb_stall;
     wire [1:0]  fwd_a;
     wire [1:0]  fwd_b;
 
@@ -501,7 +502,8 @@ module core_top #(
     mem_wb_reg #(.DATA_WIDTH(DATA_WIDTH), .ADDR_WIDTH(ADDR_WIDTH)) u_mem_wb (
         .clk           (clk),
         .rst_n         (rst_n),
-        .flush         (mem_wb_flush),
+        .stall         (mem_wb_stall),   // D$ stall: hold MEM/WB to preserve forwarding
+        .flush         (mem_wb_flush),   // always 0 from hazard unit
         .mem_pc4       (mem_pc4),
         .mem_alu_result(mem_alu_result),
         .mem_rdata     (mem_rdata),
@@ -538,8 +540,8 @@ module core_top #(
         .if_id_rs2     (id_rs2_addr),
         .id_ex_rs1     (ex_rs1_addr),
         .id_ex_rs2     (ex_rs2_addr),
-        .mispredicted  (flush_r),   // registered: any_correction delayed by 1 cycle
-        .ex_jalr       (1'b0),      // JALR is already captured inside flush_r
+        .mispredicted  (any_correction | flush_r), // dual-cycle flush: cycle N kills EX candidate,
+        .ex_jalr       (1'b0),                    //   cycle N+1 (flush_r) kills the wrong-path IF fetch
         .icache_stall  (icache_stall),
         .dcache_stall  (dcache_stall),
         .pc_stall      (pc_stall),
@@ -549,6 +551,7 @@ module core_top #(
         .id_ex_stall   (id_ex_stall),
         .ex_mem_stall  (ex_mem_stall),
         .mem_wb_flush  (mem_wb_flush),
+        .mem_wb_stall  (mem_wb_stall),
         .fwd_a         (fwd_a),
         .fwd_b         (fwd_b)
     );

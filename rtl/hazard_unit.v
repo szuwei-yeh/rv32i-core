@@ -45,7 +45,8 @@ module hazard_unit (
     output wire        id_ex_flush,    // flush ID/EX (insert bubble)
     output wire        id_ex_stall,    // stall ID/EX (hold for D$ miss)
     output wire        ex_mem_stall,   // stall EX/MEM (hold for D$ miss)
-    output wire        mem_wb_flush,   // flush MEM/WB (bubble during D$ miss)
+    output wire        mem_wb_flush,   // flush MEM/WB (reserved; not used for D$ — use stall instead)
+    output wire        mem_wb_stall,   // stall MEM/WB (hold for D$ miss — preserves forwarding)
 
     // Forwarding mux selects
     // 2'b00 = register file, 2'b01 = MEM/WB wb_data, 2'b10 = EX/MEM alu_result
@@ -80,10 +81,15 @@ module hazard_unit (
     assign id_ex_flush  = (load_use_hazard || icache_stall) ||
                           (flush_pipeline && !dcache_stall);
 
-    // New D$-miss outputs
+    // D$-miss outputs: freeze entire pipeline up to and including MEM/WB.
+    // MEM/WB is STALLED (not flushed) so the instruction in WB keeps its forwarding
+    // data visible to the EX stage throughout the stall.  When the stall clears,
+    // EX can still use MEM-EX forwarding from WB for the register that was in
+    // flight (e.g. the base-address register of a load immediately after a store).
     assign id_ex_stall  = dcache_stall;
     assign ex_mem_stall = dcache_stall;
-    assign mem_wb_flush = dcache_stall;
+    assign mem_wb_flush = 1'b0;        // never flush MEM/WB via hazard unit
+    assign mem_wb_stall = dcache_stall;
 
     // ---- EX-EX forwarding (higher priority): from EX/MEM ----
     wire fwd_a_ex = ex_mem_reg_we && (ex_mem_rd != 5'b0) && (ex_mem_rd == id_ex_rs1);

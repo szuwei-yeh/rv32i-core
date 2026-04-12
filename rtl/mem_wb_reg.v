@@ -6,7 +6,8 @@ module mem_wb_reg #(
 )(
     input  wire                  clk,
     input  wire                  rst_n,
-    input  wire                  flush,  // insert bubble (D$ miss — prevents spurious WB)
+    input  wire                  stall,  // hold register (D$ stall — takes priority, preserves forwarding)
+    input  wire                  flush,  // insert bubble (branch flush — lower priority than stall)
 
     // Data inputs from MEM stage
     input  wire [ADDR_WIDTH-1:0] mem_pc4,
@@ -29,7 +30,17 @@ module mem_wb_reg #(
     output reg  [1:0]            wb_wb_sel
 );
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
+            wb_pc4        <= {ADDR_WIDTH{1'b0}};
+            wb_alu_result <= {DATA_WIDTH{1'b0}};
+            wb_mem_data   <= {DATA_WIDTH{1'b0}};
+            wb_rd         <= 5'b0;
+            wb_reg_we     <= 1'b0;
+            wb_wb_sel     <= 2'b0;
+        end else if (stall) begin
+            // Hold all outputs — D$ stall freezes MEM/WB to preserve forwarding context
+            // (prevents loss of the MEM-EX forwarding source for instructions in EX)
+        end else if (flush) begin
             wb_pc4        <= {ADDR_WIDTH{1'b0}};
             wb_alu_result <= {DATA_WIDTH{1'b0}};
             wb_mem_data   <= {DATA_WIDTH{1'b0}};
