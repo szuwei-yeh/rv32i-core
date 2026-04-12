@@ -9,7 +9,9 @@ set PROJ_NAME  rv32i_core
 set PROJ_DIR   [file normalize [file dirname [info script]]/$PROJ_NAME]
 set RTL_DIR    [file normalize [file dirname [info script]]/../rtl]
 set FPGA_DIR   [file normalize [file dirname [info script]]/../fpga]
-set PART       xc7a35tcpg236-1
+# Note: target changed to xc7a100tcsg324-1 (Nexys4 DDR, 63400 LUTs) because
+# the cache register arrays exceed xc7a35t's 20800 LUTs.
+set PART       xc7a100tcsg324-1
 
 puts "=== Creating Vivado project at $PROJ_DIR ==="
 create_project $PROJ_NAME $PROJ_DIR -part $PART -force
@@ -20,7 +22,7 @@ set_property top synthesis_top [current_fileset]
 update_compile_order -fileset sources_1
 
 # ── Add constraints ──────────────────────────────────────────
-add_files -fileset constrs_1 -norecurse $FPGA_DIR/basys3.xdc
+add_files -fileset constrs_1 -norecurse $FPGA_DIR/nexys4.xdc
 
 # ── Synthesis ────────────────────────────────────────────────
 puts "=== Running synthesis ==="
