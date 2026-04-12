@@ -3,10 +3,10 @@
 ## Device: xc7a35tcpg236-1
 ## ============================================================
 
-## 100 MHz system clock
+## 80 MHz system clock (Fmax ~80.6 MHz after timing optimisations)
 set_property PACKAGE_PIN W5  [get_ports clk]
 set_property IOSTANDARD LVCMOS33 [get_ports clk]
-create_clock -add -name sys_clk_pin -period 10.00 -waveform {0 5} [get_ports clk]
+create_clock -add -name sys_clk_pin -period 12.50 -waveform {0 6.25} [get_ports clk]
 
 ## Reset — BTNC (active HIGH; synthesis_top inverts to rst_n)
 set_property PACKAGE_PIN T18 [get_ports btn_rst]
