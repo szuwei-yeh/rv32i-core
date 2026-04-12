@@ -1,7 +1,8 @@
 `timescale 1ns/1ps
 // D$ — write-back + write-allocate
 // On read  hit : return data combinatorially, no stall.
-// On write hit : merge into cache line, mark dirty, no stall.
+// On write hit : register context for one cycle, commit via FF-driven CE;
+//               1-cycle stall per store hit — eliminates pipe_addr→CE timing path.
 // On read  miss: [writeback dirty line if needed] → fill LINE_WORDS cycles → return data.
 // On write miss: [writeback dirty line if needed] → fill LINE_WORDS cycles → merge store.
 // Fill / writeback use dmem's one-word-per-cycle port (async read, sync write).
@@ -116,8 +117,33 @@ module dcache #(
     reg [DATA_WIDTH-1:0]   miss_wr_data;
     reg [2:0]              miss_funct3;
 
+    // ── Registered write-hit (timing optimisation) ────────────────────────
+    // The combinational path  pipe_addr → hit-detect → addr-decode → cache_data/CE
+    // was the post-optimisation critical path (~12 ns at 80 MHz).  The CE for each
+    // cache_data FF depended on pipe_addr[9:4] (index) and pipe_addr[3:2] (offset)
+    // through a multi-level hit-detection tree — 11 logic levels, fo=160 on the
+    // address bus.
+    //
+    // Fix: on a store hit, register the hit context for one cycle; commit the write
+    // on the next cycle using only FF Q-pin outputs as CE sources (< 1 ns path).
+    // The pipeline is stalled for exactly 1 cycle per store hit.
+    // Load hits, load misses, and store misses are completely unaffected.
+    reg        pending_wr;
+    reg        pending_way_r;
+    reg [INDEX_BITS-1:0]  pending_index_r;
+    reg [OFFSET_BITS-1:0] pending_offset_r;
+    reg [1:0]             pending_boff_r;
+    reg [2:0]             pending_fn3_r;
+    reg [DATA_WIDTH-1:0]  pending_data_r;
+
     wire access_active = pipe_mem_re || pipe_mem_we;
-    assign stall = (state != S_IDLE) || (access_active && !cache_hit);
+
+    // write_hit: store that hits the cache in IDLE, not already being committed
+    wire write_hit = (state == S_IDLE) && access_active
+                     && cache_hit && pipe_mem_we && !pending_wr;
+
+    // Stall: miss, FSM busy, or write-hit detected (1-cycle hold for registration)
+    assign stall = (state != S_IDLE) || (access_active && !cache_hit) || write_hit;
 
     // ---------------------------------------------------------------
     // hit_raw: raw 32-bit word from cache at addr_offset (combinatorial)
@@ -218,7 +244,6 @@ module dcache #(
     // dmem port combinatorial steering
     // ---------------------------------------------------------------
     always @(*) begin
-        // Safe defaults
         dmem_addr    = pipe_addr;
         dmem_we      = 1'b0;
         dmem_funct3  = 3'b010;
@@ -229,7 +254,7 @@ module dcache #(
                 dmem_addr   = {cache_tag[miss_way][miss_index],
                                miss_index, wb_word, 2'b00};
                 dmem_we     = 1'b1;
-                dmem_funct3 = 3'b010; // SW
+                dmem_funct3 = 3'b010;
                 case (wb_word)
                     2'd0: dmem_wr_data = cache_data0[miss_way][miss_index];
                     2'd1: dmem_wr_data = cache_data1[miss_way][miss_index];
@@ -243,7 +268,7 @@ module dcache #(
                 dmem_funct3  = 3'b010;
                 dmem_wr_data = {DATA_WIDTH{1'b0}};
             end
-            default: ; // S_IDLE: dmem not driven
+            default: ;
         endcase
     end
 
@@ -258,6 +283,7 @@ module dcache #(
             fill_word  <= {OFFSET_BITS{1'b0}};
             hit_count  <= 32'b0;
             miss_count <= 32'b0;
+            pending_wr <= 1'b0;
             for (ii = 0; ii < WAYS; ii = ii + 1)
                 for (jj = 0; jj < NUM_SETS; jj = jj + 1) begin
                     cache_valid[ii][jj] <= 1'b0;
@@ -265,33 +291,56 @@ module dcache #(
                     lru[jj]             <= 1'b0;
                 end
         end else begin
+
+            // ── Step 1: latch write-hit context ────────────────────────────
+            // pending_wr is 1 for exactly one cycle (the commit cycle).
+            // write_hit is 0 when pending_wr=1 (guarded by !pending_wr), so
+            // pending_wr self-clears automatically via the assignment below.
+            pending_wr <= write_hit;
+            if (write_hit) begin
+                pending_way_r    <= hit_sel;
+                pending_index_r  <= addr_index;
+                pending_offset_r <= addr_offset;
+                pending_boff_r   <= addr_boff;
+                pending_fn3_r    <= pipe_funct3;
+                pending_data_r   <= pipe_wr_data;
+            end
+
+            // ── Step 2: commit pending write using registered signals ───────
+            // All CE inputs (pending_wr, pending_offset_r, pending_index_r,
+            // pending_way_r) are FF Q-pins → setup path < 1 ns.
+            if (pending_wr) begin
+                case (pending_offset_r)
+                    2'd0: cache_data0[pending_way_r][pending_index_r] <=
+                              merge_store(cache_data0[pending_way_r][pending_index_r],
+                                          pending_data_r, pending_fn3_r, pending_boff_r);
+                    2'd1: cache_data1[pending_way_r][pending_index_r] <=
+                              merge_store(cache_data1[pending_way_r][pending_index_r],
+                                          pending_data_r, pending_fn3_r, pending_boff_r);
+                    2'd2: cache_data2[pending_way_r][pending_index_r] <=
+                              merge_store(cache_data2[pending_way_r][pending_index_r],
+                                          pending_data_r, pending_fn3_r, pending_boff_r);
+                    default: cache_data3[pending_way_r][pending_index_r] <=
+                              merge_store(cache_data3[pending_way_r][pending_index_r],
+                                          pending_data_r, pending_fn3_r, pending_boff_r);
+                endcase
+                cache_dirty[pending_way_r][pending_index_r] <= 1'b1;
+            end
+
+            // ── Step 3: FSM ────────────────────────────────────────────────
             case (state)
 
-                // ── IDLE ──────────────────────────────────────────────
+                // ── IDLE ──────────────────────────────────────────────────
                 S_IDLE: begin
-                    if (access_active) begin
+                    // Skip normal access handling during the pending-commit cycle
+                    // (same store instruction still in MEM, stall=0 that cycle).
+                    if (access_active && !pending_wr) begin
                         if (cache_hit) begin
                             hit_count <= hit_count + 1;
                             if (WAYS > 1) lru[addr_index] <= hit_sel;
-
-                            if (pipe_mem_we) begin
-                                // Write hit: merge store into cache, mark dirty
-                                case (addr_offset)
-                                    2'd0: cache_data0[hit_sel][addr_index] <=
-                                              merge_store(cache_data0[hit_sel][addr_index],
-                                                          pipe_wr_data, pipe_funct3, addr_boff);
-                                    2'd1: cache_data1[hit_sel][addr_index] <=
-                                              merge_store(cache_data1[hit_sel][addr_index],
-                                                          pipe_wr_data, pipe_funct3, addr_boff);
-                                    2'd2: cache_data2[hit_sel][addr_index] <=
-                                              merge_store(cache_data2[hit_sel][addr_index],
-                                                          pipe_wr_data, pipe_funct3, addr_boff);
-                                    default: cache_data3[hit_sel][addr_index] <=
-                                              merge_store(cache_data3[hit_sel][addr_index],
-                                                          pipe_wr_data, pipe_funct3, addr_boff);
-                                endcase
-                                cache_dirty[hit_sel][addr_index] <= 1'b1;
-                            end
+                            // Write hit: context already latched in Step 1;
+                            //            write committed in Step 2 next cycle.
+                            // Read  hit: data returned combinatorially — nothing to do.
                         end else begin
                             // Miss — save context for fill
                             miss_count    <= miss_count + 1;
@@ -316,8 +365,7 @@ module dcache #(
                     end
                 end
 
-                // ── WRITEBACK ─────────────────────────────────────────
-                // dmem write is issued combinatorially; dmem latches on posedge.
+                // ── WRITEBACK ─────────────────────────────────────────────
                 S_WRITEBACK: begin
                     if (wb_word == LINE_WORDS - 1) begin
                         cache_valid[miss_way][miss_index] <= 1'b0;
@@ -330,11 +378,8 @@ module dcache #(
                     end
                 end
 
-                // ── FILL ──────────────────────────────────────────────
-                // dmem_addr is driven combinatorially from fill_word;
-                // dmem_rd_data is available the same cycle (async read).
+                // ── FILL ──────────────────────────────────────────────────
                 S_FILL: begin
-                    // Latch the word from dmem
                     case (fill_word)
                         2'd0: cache_data0[miss_way][miss_index] <= dmem_rd_data;
                         2'd1: cache_data1[miss_way][miss_index] <= dmem_rd_data;
@@ -343,15 +388,11 @@ module dcache #(
                     endcase
 
                     if (fill_word == LINE_WORDS - 1) begin
-                        // Validate line
                         cache_valid[miss_way][miss_index] <= 1'b1;
                         cache_tag  [miss_way][miss_index] <= miss_tag;
                         if (WAYS > 1) lru[miss_index] <= miss_way;
 
                         if (miss_is_write) begin
-                            // Write-allocate: merge the pending store.
-                            // If miss_offset == fill_word, the current word hasn't
-                            // been committed yet — use dmem_rd_data as old value.
                             case (miss_offset)
                                 2'd0: cache_data0[miss_way][miss_index] <=
                                           merge_store(
