@@ -13,15 +13,16 @@ module dmem #(
     input  wire [DATA_WIDTH-1:0] wr_data,
     output wire [DATA_WIDTH-1:0] rd_data
 );
+// synthesis translate_off
+    // Simulation-only memory array.
+    // Synthesis black box: Vivado sees only ports, not the array, preventing
+    // the optimizer from inferring constant read data and trimming the cache.
     reg [DATA_WIDTH-1:0] mem [0:MEM_DEPTH-1];
-
-    // synthesis translate_off
     integer i;
     initial begin
         for (i = 0; i < MEM_DEPTH; i = i + 1)
             mem[i] = 32'h0;
     end
-    // synthesis translate_on
 
     wire [ADDR_WIDTH-1:0] word_addr = {{(ADDR_WIDTH-2){1'b0}}, addr[ADDR_WIDTH-1:2]};
     wire [1:0]            byte_off  = addr[1:0];
@@ -95,4 +96,5 @@ module dmem #(
             endcase
         end
     end
+// synthesis translate_on
 endmodule
