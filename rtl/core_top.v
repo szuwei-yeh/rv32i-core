@@ -199,9 +199,30 @@ module core_top #(
     wire                  any_correction        = ex_mispredicted || ex_jalr;
     wire [ADDR_WIDTH-1:0] correction_target     = ex_jalr ? ex_jalr_target : ex_mispredict_target;
 
+    // ── Registered flush (timing optimisation) ───────────────────────────────
+    // The combinational path forwarding→ALU→misprediction→flush_pipeline had
+    // fan-out 235, contributing 11.9 ns of routing delay (80% of critical path).
+    // Registering the correction breaks this path at the cost of +1 bubble per
+    // misprediction (penalty: 2 cycles → 3 cycles).
+    reg                   flush_r;
+    reg [ADDR_WIDTH-1:0]  correction_target_r;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            flush_r             <= 1'b0;
+            correction_target_r <= {ADDR_WIDTH{1'b0}};
+        end else if (!dcache_stall) begin
+            flush_r             <= any_correction;
+            correction_target_r <= correction_target;
+        end
+        // During dcache_stall the whole pipeline is frozen; hold flush_r.
+    end
+
     // PC next: correction (highest) > predictor redirect > sequential
-    wire [ADDR_WIDTH-1:0] pc_next = any_correction ? correction_target :
-                                    pred_taken      ? pred_target       :
+    // Uses flush_r (registered) so the PC mux is driven by a local FF,
+    // not by a 235-fanout combinational net.
+    wire [ADDR_WIDTH-1:0] pc_next = flush_r    ? correction_target_r :
+                                    pred_taken  ? pred_target          :
                                     if_pc4;
 
     pc_reg #(.ADDR_WIDTH(ADDR_WIDTH)) u_pc (
@@ -413,7 +434,7 @@ module core_top #(
     ex_mem_reg #(.DATA_WIDTH(DATA_WIDTH), .ADDR_WIDTH(ADDR_WIDTH)) u_ex_mem (
         .clk           (clk),
         .rst_n         (rst_n),
-        .flush         (1'b0),        // no flush after EX
+        .flush         (flush_r && !dcache_stall), // 3rd bubble from delayed flush
         .stall         (ex_mem_stall),
         .ex_pc4        (ex_pc4),
         .ex_alu_result (ex_alu_result),
@@ -517,8 +538,8 @@ module core_top #(
         .if_id_rs2     (id_rs2_addr),
         .id_ex_rs1     (ex_rs1_addr),
         .id_ex_rs2     (ex_rs2_addr),
-        .mispredicted  (ex_mispredicted),
-        .ex_jalr       (ex_jalr),
+        .mispredicted  (flush_r),   // registered: any_correction delayed by 1 cycle
+        .ex_jalr       (1'b0),      // JALR is already captured inside flush_r
         .icache_stall  (icache_stall),
         .dcache_stall  (dcache_stall),
         .pc_stall      (pc_stall),
