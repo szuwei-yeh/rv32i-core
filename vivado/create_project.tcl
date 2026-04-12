@@ -2,7 +2,7 @@
 # create_project.tcl
 # Usage (from rv32i-core root):
 #   vivado -mode batch -source vivado/create_project.tcl
-# Or open Vivado GUI → Tools → Run Tcl Script → select this file
+# Or open Vivado GUI -> Tools -> Run Tcl Script -> select this file
 # ============================================================
 
 set PROJ_NAME  rv32i_core
@@ -16,15 +16,15 @@ set PART       xc7a100tcsg324-1
 puts "=== Creating Vivado project at $PROJ_DIR ==="
 create_project $PROJ_NAME $PROJ_DIR -part $PART -force
 
-# ── Add all RTL sources ──────────────────────────────────────
+# -- Add all RTL sources ------------------------------------------------------
 add_files -norecurse [glob $RTL_DIR/*.v]
 set_property top synthesis_top [current_fileset]
 update_compile_order -fileset sources_1
 
-# ── Add constraints ──────────────────────────────────────────
+# -- Add constraints ----------------------------------------------------------
 add_files -fileset constrs_1 -norecurse $FPGA_DIR/nexys4.xdc
 
-# ── Synthesis ────────────────────────────────────────────────
+# -- Synthesis ----------------------------------------------------------------
 puts "=== Running synthesis ==="
 launch_runs synth_1 -jobs 4
 wait_on_run synth_1
@@ -33,10 +33,20 @@ if {[get_property PROGRESS [get_runs synth_1]] != "100%"} {
 }
 open_run synth_1
 report_utilization -file $PROJ_DIR/post_synth_utilization.rpt
-puts "  → post_synth_utilization.rpt written"
+puts "  -> post_synth_utilization.rpt written"
 
-# ── Implementation ───────────────────────────────────────────
-puts "=== Running implementation ==="
+# -- Implementation -----------------------------------------------------------
+# Strategy: Performance_ExplorePostRoutePhysOpt
+#   Enables post-place AND post-route phys_opt_design with AggressiveExplore.
+#   Adds ~15% runtime but gives the router every tool to close the last
+#   few picoseconds of slack on the forwarding->ALU->branch->flush_r path.
+puts "=== Running implementation (Performance_ExplorePostRoutePhysOpt) ==="
+set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED                true               [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE            AggressiveExplore  [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED     true               [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore  [get_runs impl_1]
+
 launch_runs impl_1 -jobs 4
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
@@ -44,16 +54,16 @@ if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
 }
 open_run impl_1
 
-# ── Reports ──────────────────────────────────────────────────
+# -- Reports ------------------------------------------------------------------
 puts "=== Writing reports ==="
-report_timing_summary  -file $PROJ_DIR/timing_summary.rpt       -warn_on_violation
+report_timing_summary  -file $PROJ_DIR/timing_summary.rpt      -warn_on_violation
 report_utilization     -file $PROJ_DIR/utilization.rpt
 report_power           -file $PROJ_DIR/power.rpt
 
 puts ""
 puts "============================================================"
 puts " DONE.  Check these files in $PROJ_DIR:"
-puts "   timing_summary.rpt   ← WNS / achieved frequency"
-puts "   utilization.rpt      ← LUT / FF / BRAM counts"
-puts "   power.rpt            ← estimated power"
+puts "   timing_summary.rpt   <- WNS / achieved frequency"
+puts "   utilization.rpt      <- LUT / FF / BRAM counts"
+puts "   power.rpt            <- estimated power"
 puts "============================================================"
