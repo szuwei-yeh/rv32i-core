@@ -4,6 +4,11 @@
 //   1. Full forwarding: EX-EX (from EX/MEM) and MEM-EX (from MEM/WB)
 //   2. Load-use hazard detection: 1-cycle stall
 //   3. Branch/jump misprediction flush (2 stages)
+//   4. I$ miss stall  — stalls IF/ID, injects bubble into ID/EX (like load-use)
+//   5. D$ miss stall  — freezes entire pipeline up to MEM, bubbles MEM/WB
+//
+// Priority (highest first): dcache_stall > load_use / icache_stall > branch flush
+// When dcache_stall is asserted, branch flush is deferred until the stall clears.
 module hazard_unit (
     // ID/EX stage info (instruction currently in EX)
     input  wire        id_ex_mem_re,   // is it a load?
@@ -25,16 +30,22 @@ module hazard_unit (
     input  wire [4:0]  id_ex_rs1,
     input  wire [4:0]  id_ex_rs2,
 
-    // Branch/jump taken signal (from EX stage)
-    input  wire        branch_taken,
-    input  wire        ex_jal,
-    input  wire        ex_jalr,
+    // Branch/jump redirect signals (from EX stage)
+    input  wire        mispredicted, // branch/JAL prediction was wrong → flush 2 stages
+    input  wire        ex_jalr,      // JALR always needs redirect (not predicted)
+
+    // Cache stall inputs
+    input  wire        icache_stall,   // I$ miss — stall IF
+    input  wire        dcache_stall,   // D$ miss — stall MEM (and all upstream)
 
     // Stall/flush outputs
     output wire        pc_stall,       // stall PC register
     output wire        if_id_stall,    // stall IF/ID register
     output wire        if_id_flush,    // flush IF/ID (insert bubble)
     output wire        id_ex_flush,    // flush ID/EX (insert bubble)
+    output wire        id_ex_stall,    // stall ID/EX (hold for D$ miss)
+    output wire        ex_mem_stall,   // stall EX/MEM (hold for D$ miss)
+    output wire        mem_wb_flush,   // flush MEM/WB (bubble during D$ miss)
 
     // Forwarding mux selects
     // 2'b00 = register file, 2'b01 = MEM/WB wb_data, 2'b10 = EX/MEM alu_result
@@ -46,13 +57,33 @@ module hazard_unit (
                            (id_ex_rd != 5'b0) &&
                            ((id_ex_rd == if_id_rs1) || (id_ex_rd == if_id_rs2));
 
-    // ---- Branch/jump misprediction flush ----
-    wire flush_pipeline = branch_taken || ex_jal || ex_jalr;
+    // ---- Branch/jump flush ----
+    // With the branch predictor: only mispredictions and JALR need a flush.
+    // Correct predictions are handled transparently in IF; no flush required.
+    wire flush_pipeline = mispredicted || ex_jalr;
 
-    assign pc_stall    = load_use_hazard;
-    assign if_id_stall = load_use_hazard;
-    assign if_id_flush = flush_pipeline && !load_use_hazard;
-    assign id_ex_flush = load_use_hazard || flush_pipeline;
+    // ── Stall/flush logic ─────────────────────────────────────────────────
+    // dcache_stall freezes everything from IF through MEM; branch flush deferred.
+    // icache_stall and load_use behave identically: stall IF+ID, bubble ID/EX.
+
+    // During a branch redirect, allow PC to take the target even if I$ fill is active.
+    // (if_id_reg gives flush priority over stall, so the flush will clear IF/ID correctly.)
+    assign pc_stall     = load_use_hazard || (icache_stall && !flush_pipeline) || dcache_stall;
+    assign if_id_stall  = load_use_hazard || icache_stall || dcache_stall;
+
+    // IF/ID flush: redirect must clear IF/ID even during an I$ miss.
+    // dcache_stall defers branch flush (entire pipeline frozen); icache_stall does not.
+    assign if_id_flush  = flush_pipeline && !load_use_hazard && !dcache_stall;
+
+    // ID/EX flush: bubble on load-use / icache miss, or branch redirect
+    //              (but NOT when dcache_stall is freezing that register)
+    assign id_ex_flush  = (load_use_hazard || icache_stall) ||
+                          (flush_pipeline && !dcache_stall);
+
+    // New D$-miss outputs
+    assign id_ex_stall  = dcache_stall;
+    assign ex_mem_stall = dcache_stall;
+    assign mem_wb_flush = dcache_stall;
 
     // ---- EX-EX forwarding (higher priority): from EX/MEM ----
     wire fwd_a_ex = ex_mem_reg_we && (ex_mem_rd != 5'b0) && (ex_mem_rd == id_ex_rs1);

@@ -7,6 +7,7 @@ module ex_mem_reg #(
     input  wire                  clk,
     input  wire                  rst_n,
     input  wire                  flush,
+    input  wire                  stall,  // hold register (D$ miss — takes priority over flush)
 
     // Data inputs from EX stage
     input  wire [ADDR_WIDTH-1:0] ex_pc4,
@@ -45,6 +46,8 @@ module ex_mem_reg #(
             mem_mem_we     <= 1'b0;
             mem_mem_re     <= 1'b0;
             mem_wb_sel     <= 2'b0;
+        end else if (stall) begin
+            // Hold all outputs — D$ miss freezes EX/MEM
         end else begin
             mem_pc4        <= ex_pc4;
             mem_alu_result <= ex_alu_result;

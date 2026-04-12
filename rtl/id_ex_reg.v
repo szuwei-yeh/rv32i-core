@@ -7,6 +7,7 @@ module id_ex_reg #(
     input  wire                  clk,
     input  wire                  rst_n,
     input  wire                  flush,  // insert bubble (load-use stall or branch flush)
+    input  wire                  stall,  // hold register (D$ miss — takes priority over flush)
 
     // Data inputs from ID stage
     input  wire [ADDR_WIDTH-1:0] id_pc,
@@ -30,6 +31,8 @@ module id_ex_reg #(
     input  wire                  id_branch,
     input  wire                  id_jal,
     input  wire                  id_jalr,
+    input  wire                  id_pred_taken,
+    input  wire [ADDR_WIDTH-1:0] id_pred_target,
 
     // Data outputs to EX stage
     output reg  [ADDR_WIDTH-1:0] ex_pc,
@@ -52,10 +55,12 @@ module id_ex_reg #(
     output reg  [1:0]            ex_wb_sel,
     output reg                   ex_branch,
     output reg                   ex_jal,
-    output reg                   ex_jalr
+    output reg                   ex_jalr,
+    output reg                   ex_pred_taken,
+    output reg  [ADDR_WIDTH-1:0] ex_pred_target
 );
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush) begin
+        if (!rst_n) begin
             ex_pc        <= {ADDR_WIDTH{1'b0}};
             ex_pc4       <= {ADDR_WIDTH{1'b0}};
             ex_rs1_data  <= {DATA_WIDTH{1'b0}};
@@ -72,9 +77,35 @@ module id_ex_reg #(
             ex_mem_we    <= 1'b0;
             ex_mem_re    <= 1'b0;
             ex_wb_sel    <= 2'b0;
-            ex_branch    <= 1'b0;
-            ex_jal       <= 1'b0;
-            ex_jalr      <= 1'b0;
+            ex_branch       <= 1'b0;
+            ex_jal          <= 1'b0;
+            ex_jalr         <= 1'b0;
+            ex_pred_taken   <= 1'b0;
+            ex_pred_target  <= {ADDR_WIDTH{1'b0}};
+        end else if (stall) begin
+            // Hold all outputs — D$ miss freezes this register
+        end else if (flush) begin
+            ex_pc        <= {ADDR_WIDTH{1'b0}};
+            ex_pc4       <= {ADDR_WIDTH{1'b0}};
+            ex_rs1_data  <= {DATA_WIDTH{1'b0}};
+            ex_rs2_data  <= {DATA_WIDTH{1'b0}};
+            ex_imm       <= {DATA_WIDTH{1'b0}};
+            ex_rs1_addr  <= 5'b0;
+            ex_rs2_addr  <= 5'b0;
+            ex_rd        <= 5'b0;
+            ex_funct3    <= 3'b0;
+            ex_alu_ctrl  <= 4'b0;
+            ex_alu_src_a <= 1'b0;
+            ex_alu_src_b <= 1'b0;
+            ex_reg_we    <= 1'b0;
+            ex_mem_we    <= 1'b0;
+            ex_mem_re    <= 1'b0;
+            ex_wb_sel    <= 2'b0;
+            ex_branch       <= 1'b0;
+            ex_jal          <= 1'b0;
+            ex_jalr         <= 1'b0;
+            ex_pred_taken   <= 1'b0;
+            ex_pred_target  <= {ADDR_WIDTH{1'b0}};
         end else begin
             ex_pc        <= id_pc;
             ex_pc4       <= id_pc4;
@@ -92,9 +123,11 @@ module id_ex_reg #(
             ex_mem_we    <= id_mem_we;
             ex_mem_re    <= id_mem_re;
             ex_wb_sel    <= id_wb_sel;
-            ex_branch    <= id_branch;
-            ex_jal       <= id_jal;
-            ex_jalr      <= id_jalr;
+            ex_branch       <= id_branch;
+            ex_jal          <= id_jal;
+            ex_jalr         <= id_jalr;
+            ex_pred_taken   <= id_pred_taken;
+            ex_pred_target  <= id_pred_target;
         end
     end
 endmodule

@@ -1,8 +1,10 @@
 `timescale 1ns/1ps
 // RV32I 5-Stage Pipelined Processor — Top Level
 // Stages: IF → ID → EX → MEM → WB
-// Hazards: full forwarding (EX-EX, MEM-EX), load-use stall, branch flush (predict not-taken)
-// Branch resolved in EX stage; flushes IF and ID on misprediction.
+// Hazards: full forwarding (EX-EX, MEM-EX), load-use stall,
+//          branch predictor (2-bit BHT + BTB), JALR always 2-cycle penalty.
+// Branch/JAL resolved in EX stage; flushes 2 stages only on misprediction.
+// L1 I$ and D$ added in front of imem/dmem.
 
 module core_top #(
     parameter DATA_WIDTH = 32,
@@ -10,7 +12,9 @@ module core_top #(
 )(
     input  wire        clk,
     input  wire        rst_n,
-    output wire [31:0] debug_pc       // current IF-stage PC (for debug / ILA)
+    output wire [31:0] debug_pc,      // IF-stage PC
+    output wire [31:0] debug_wb_data, // WB-stage write-back value (prevents trim)
+    output wire        debug_reg_we   // WB-stage register write enable
 );
     // =========================================================
     // Wire declarations
@@ -19,15 +23,19 @@ module core_top #(
     // IF stage
     wire [ADDR_WIDTH-1:0] if_pc;
     wire [ADDR_WIDTH-1:0] if_pc4;
-    wire [DATA_WIDTH-1:0] if_instr;
+    wire [DATA_WIDTH-1:0] if_instr;   // comes from I$
 
-    // debug_pc — direct view of the IF-stage program counter
-    assign debug_pc = if_pc;
+    // Debug outputs — expose key pipeline signals so Vivado keeps the full datapath
+    assign debug_pc      = if_pc;
+    assign debug_wb_data = wb_data;
+    assign debug_reg_we  = wb_reg_we;
 
     // IF/ID register outputs (ID stage inputs)
     wire [ADDR_WIDTH-1:0] id_pc;
     wire [ADDR_WIDTH-1:0] id_pc4;
     wire [DATA_WIDTH-1:0] id_instr;
+    wire                  id_pred_taken;
+    wire [ADDR_WIDTH-1:0] id_pred_target;
 
     // ID stage decode wires
     wire [6:0] id_opcode  = id_instr[6:0];
@@ -63,6 +71,7 @@ module core_top #(
     wire [DATA_WIDTH-1:0] wb_data;
 
     // ID/EX register outputs (EX stage inputs)
+    // ex_pred_taken / ex_pred_target declared earlier (branch predictor section)
     wire [ADDR_WIDTH-1:0] ex_pc;
     wire [ADDR_WIDTH-1:0] ex_pc4;
     wire [DATA_WIDTH-1:0] ex_rs1_data;
@@ -120,8 +129,35 @@ module core_top #(
     wire        if_id_stall;
     wire        if_id_flush;
     wire        id_ex_flush;
+    wire        id_ex_stall;
+    wire        ex_mem_stall;
+    wire        mem_wb_flush;
     wire [1:0]  fwd_a;
     wire [1:0]  fwd_b;
+
+    // Branch predictor signals
+    wire                  pred_taken;         // IF-stage prediction
+    wire [ADDR_WIDTH-1:0] pred_target;
+    wire                  ex_pred_taken;      // prediction that was made for instr now in EX
+    wire [ADDR_WIDTH-1:0] ex_pred_target;
+    wire                  ex_actual_taken;    // true outcome for branch/JAL in EX
+    wire [ADDR_WIDTH-1:0] ex_actual_target;   // true target (= ex_branch_target)
+    wire                  ex_mispredicted;    // prediction was wrong → flush + correct PC
+
+    // Cache stall signals
+    wire        icache_stall;
+    wire        dcache_stall;
+
+    // I$ ↔ imem wires
+    wire [ADDR_WIDTH-1:0] icache_mem_addr;
+    wire [DATA_WIDTH-1:0] imem_instr_out;
+
+    // D$ ↔ dmem wires
+    wire [ADDR_WIDTH-1:0] dcache_dmem_addr;
+    wire                  dcache_dmem_we;
+    wire [2:0]            dcache_dmem_funct3;
+    wire [DATA_WIDTH-1:0] dcache_dmem_wr_data;
+    wire [DATA_WIDTH-1:0] dmem_rd_data;
 
     // =========================================================
     // IF Stage
@@ -140,15 +176,33 @@ module core_top #(
     assign ex_branch_target    = ex_pc + ex_imm;
     assign ex_jalr_target      = {ex_alu_result[ADDR_WIDTH-1:1], 1'b0}; // clear bit 0
 
-    assign ex_pc_next_redirect = ex_jalr       ? ex_jalr_target :
+    // keep ex_pc_next_redirect for completeness (used nowhere now, but harmless)
+    assign ex_pc_next_redirect = ex_jalr            ? ex_jalr_target  :
                                  ex_branch_taken || ex_jal ? ex_branch_target :
                                  {ADDR_WIDTH{1'b0}};
 
     assign if_pc4 = if_pc + 32'd4;
 
-    wire redirect = ex_branch_taken || ex_jal || ex_jalr;
+    // ── Branch predictor outcome in EX ───────────────────────────────────────
+    assign ex_actual_taken  = ex_branch_taken || ex_jal;
+    assign ex_actual_target = ex_branch_target; // valid when ex_actual_taken=1
 
-    wire [ADDR_WIDTH-1:0] pc_next = redirect ? ex_pc_next_redirect : if_pc4;
+    // Misprediction: wrong direction, wrong target, or false BTB hit on non-branch
+    wire ex_false_btb   = ex_pred_taken && !(ex_branch || ex_jal);
+    assign ex_mispredicted = ex_false_btb ||
+                             ((ex_branch || ex_jal) &&
+                              (ex_pred_taken != ex_actual_taken ||
+                               (ex_actual_taken && ex_pred_target != ex_actual_target)));
+
+    // Correction target: on misprediction go to actual path, on JALR go to jalr_target
+    wire [ADDR_WIDTH-1:0] ex_mispredict_target = ex_actual_taken ? ex_actual_target : ex_pc4;
+    wire                  any_correction        = ex_mispredicted || ex_jalr;
+    wire [ADDR_WIDTH-1:0] correction_target     = ex_jalr ? ex_jalr_target : ex_mispredict_target;
+
+    // PC next: correction (highest) > predictor redirect > sequential
+    wire [ADDR_WIDTH-1:0] pc_next = any_correction ? correction_target :
+                                    pred_taken      ? pred_target       :
+                                    if_pc4;
 
     pc_reg #(.ADDR_WIDTH(ADDR_WIDTH)) u_pc (
         .clk     (clk),
@@ -158,25 +212,72 @@ module core_top #(
         .pc      (if_pc)
     );
 
+    // I$ sits between PC and imem
+    icache #(
+        .ADDR_WIDTH (ADDR_WIDTH),
+        .DATA_WIDTH (DATA_WIDTH),
+        .WAYS       (1),
+        .NUM_SETS   (64),
+        .LINE_WORDS (4)
+    ) u_icache (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .if_pc     (if_pc),
+        .instr     (if_instr),
+        .stall     (icache_stall),
+        .mem_addr  (icache_mem_addr),
+        .mem_rdata (imem_instr_out),
+        .hit_count (),          // accessible via dut.u_icache.hit_count
+        .miss_count()
+    );
+
+    // Backing instruction memory — address driven by I$ during fills
     imem #(.ADDR_WIDTH(ADDR_WIDTH), .DATA_WIDTH(DATA_WIDTH)) u_imem (
-        .addr  (if_pc),
-        .instr (if_instr)
+        .addr  (icache_mem_addr),
+        .instr (imem_instr_out)
+    );
+
+    // ── Branch Predictor ─────────────────────────────────────────────────────
+    // Guard update with !dcache_stall: EX is frozen during D$ misses so we
+    // must not update the predictor for the same branch multiple times.
+    wire bp_update_en = (ex_branch || ex_jal) && !dcache_stall;
+
+    branch_predictor #(
+        .ADDR_WIDTH  (ADDR_WIDTH),
+        .NUM_ENTRIES (64)
+    ) u_bp (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .if_pc           (if_pc),
+        .pred_taken      (pred_taken),
+        .pred_target     (pred_target),
+        .ex_update_en    (bp_update_en),
+        .ex_pc           (ex_pc),
+        .ex_taken        (ex_actual_taken),
+        .ex_target       (ex_actual_target),
+        .ex_mispredicted (ex_mispredicted),
+        .branch_count    (),    // accessible via dut.u_bp.branch_count
+        .mispredict_count()
     );
 
     // =========================================================
     // IF/ID Register
     // =========================================================
     if_id_reg #(.DATA_WIDTH(DATA_WIDTH), .ADDR_WIDTH(ADDR_WIDTH)) u_if_id (
-        .clk      (clk),
-        .rst_n    (rst_n),
-        .stall    (if_id_stall),
-        .flush    (if_id_flush),
-        .if_pc    (if_pc),
-        .if_pc4   (if_pc4),
-        .if_instr (if_instr),
-        .id_pc    (id_pc),
-        .id_pc4   (id_pc4),
-        .id_instr (id_instr)
+        .clk            (clk),
+        .rst_n          (rst_n),
+        .stall          (if_id_stall),
+        .flush          (if_id_flush),
+        .if_pc          (if_pc),
+        .if_pc4         (if_pc4),
+        .if_instr       (if_instr),
+        .if_pred_taken  (pred_taken),
+        .if_pred_target (pred_target),
+        .id_pc          (id_pc),
+        .id_pc4         (id_pc4),
+        .id_instr       (id_instr),
+        .id_pred_taken  (id_pred_taken),
+        .id_pred_target (id_pred_target)
     );
 
     // =========================================================
@@ -234,6 +335,7 @@ module core_top #(
         .clk         (clk),
         .rst_n       (rst_n),
         .flush       (id_ex_flush),
+        .stall       (id_ex_stall),
         .id_pc       (id_pc),
         .id_pc4      (id_pc4),
         .id_rs1_data (id_rs1_data),
@@ -250,9 +352,11 @@ module core_top #(
         .id_mem_we   (id_mem_we),
         .id_mem_re   (id_mem_re),
         .id_wb_sel   (id_wb_sel),
-        .id_branch   (id_branch),
-        .id_jal      (id_jal),
-        .id_jalr     (id_jalr),
+        .id_branch       (id_branch),
+        .id_jal          (id_jal),
+        .id_jalr         (id_jalr),
+        .id_pred_taken   (id_pred_taken),
+        .id_pred_target  (id_pred_target),
         // outputs
         .ex_pc       (ex_pc),
         .ex_pc4      (ex_pc4),
@@ -270,9 +374,11 @@ module core_top #(
         .ex_mem_we   (ex_mem_we),
         .ex_mem_re   (ex_mem_re),
         .ex_wb_sel   (ex_wb_sel),
-        .ex_branch   (ex_branch),
-        .ex_jal      (ex_jal),
-        .ex_jalr     (ex_jalr)
+        .ex_branch       (ex_branch),
+        .ex_jal          (ex_jal),
+        .ex_jalr         (ex_jalr),
+        .ex_pred_taken   (ex_pred_taken),
+        .ex_pred_target  (ex_pred_target)
     );
 
     // =========================================================
@@ -307,7 +413,8 @@ module core_top #(
     ex_mem_reg #(.DATA_WIDTH(DATA_WIDTH), .ADDR_WIDTH(ADDR_WIDTH)) u_ex_mem (
         .clk           (clk),
         .rst_n         (rst_n),
-        .flush         (1'b0), // no flush after EX
+        .flush         (1'b0),        // no flush after EX
+        .stall         (ex_mem_stall),
         .ex_pc4        (ex_pc4),
         .ex_alu_result (ex_alu_result),
         .ex_rs2_fwd    (ex_alu_op_b_raw), // forwarded rs2 for store
@@ -330,15 +437,41 @@ module core_top #(
     );
 
     // =========================================================
-    // MEM Stage
+    // MEM Stage — D$ in front of dmem
     // =========================================================
+    dcache #(
+        .ADDR_WIDTH (ADDR_WIDTH),
+        .DATA_WIDTH (DATA_WIDTH),
+        .WAYS       (1),
+        .NUM_SETS   (64),
+        .LINE_WORDS (4)
+    ) u_dcache (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .pipe_mem_re   (mem_mem_re),
+        .pipe_mem_we   (mem_mem_we),
+        .pipe_funct3   (mem_funct3),
+        .pipe_addr     (mem_alu_result),
+        .pipe_wr_data  (mem_rs2_data),
+        .pipe_rd_data  (mem_rdata),
+        .stall         (dcache_stall),
+        .dmem_addr     (dcache_dmem_addr),
+        .dmem_we       (dcache_dmem_we),
+        .dmem_funct3   (dcache_dmem_funct3),
+        .dmem_wr_data  (dcache_dmem_wr_data),
+        .dmem_rd_data  (dmem_rd_data),
+        .hit_count     (),          // accessible via dut.u_dcache.hit_count
+        .miss_count    ()
+    );
+
+    // Backing data memory — controlled entirely by D$ during misses
     dmem #(.ADDR_WIDTH(ADDR_WIDTH), .DATA_WIDTH(DATA_WIDTH)) u_dmem (
         .clk      (clk),
-        .mem_we   (mem_mem_we),
-        .funct3   (mem_funct3),
-        .addr     (mem_alu_result),
-        .wr_data  (mem_rs2_data),
-        .rd_data  (mem_rdata)
+        .mem_we   (dcache_dmem_we),
+        .funct3   (dcache_dmem_funct3),
+        .addr     (dcache_dmem_addr),
+        .wr_data  (dcache_dmem_wr_data),
+        .rd_data  (dmem_rd_data)
     );
 
     // =========================================================
@@ -347,6 +480,7 @@ module core_top #(
     mem_wb_reg #(.DATA_WIDTH(DATA_WIDTH), .ADDR_WIDTH(ADDR_WIDTH)) u_mem_wb (
         .clk           (clk),
         .rst_n         (rst_n),
+        .flush         (mem_wb_flush),
         .mem_pc4       (mem_pc4),
         .mem_alu_result(mem_alu_result),
         .mem_rdata     (mem_rdata),
@@ -383,13 +517,17 @@ module core_top #(
         .if_id_rs2     (id_rs2_addr),
         .id_ex_rs1     (ex_rs1_addr),
         .id_ex_rs2     (ex_rs2_addr),
-        .branch_taken  (ex_branch_taken),
-        .ex_jal        (ex_jal),
+        .mispredicted  (ex_mispredicted),
         .ex_jalr       (ex_jalr),
+        .icache_stall  (icache_stall),
+        .dcache_stall  (dcache_stall),
         .pc_stall      (pc_stall),
         .if_id_stall   (if_id_stall),
         .if_id_flush   (if_id_flush),
         .id_ex_flush   (id_ex_flush),
+        .id_ex_stall   (id_ex_stall),
+        .ex_mem_stall  (ex_mem_stall),
+        .mem_wb_flush  (mem_wb_flush),
         .fwd_a         (fwd_a),
         .fwd_b         (fwd_b)
     );

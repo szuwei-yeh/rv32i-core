@@ -6,6 +6,7 @@ module mem_wb_reg #(
 )(
     input  wire                  clk,
     input  wire                  rst_n,
+    input  wire                  flush,  // insert bubble (D$ miss — prevents spurious WB)
 
     // Data inputs from MEM stage
     input  wire [ADDR_WIDTH-1:0] mem_pc4,
@@ -28,7 +29,7 @@ module mem_wb_reg #(
     output reg  [1:0]            wb_wb_sel
 );
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+        if (!rst_n || flush) begin
             wb_pc4        <= {ADDR_WIDTH{1'b0}};
             wb_alu_result <= {DATA_WIDTH{1'b0}};
             wb_mem_data   <= {DATA_WIDTH{1'b0}};
