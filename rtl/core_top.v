@@ -203,8 +203,12 @@ module core_top #(
     // ── Registered flush (timing optimisation) ───────────────────────────────
     // The combinational path forwarding→ALU→misprediction→flush_pipeline had
     // fan-out 235, contributing 11.9 ns of routing delay (80% of critical path).
-    // Registering the correction breaks this path at the cost of +1 bubble per
-    // misprediction (penalty: 2 cycles → 3 cycles).
+    // Registering the correction breaks this path; flush_pipeline (flush_r) alone
+    // drives id_ex_flush.  The wrong-path instruction that slips into EX in the
+    // correction cycle is killed by the EX/MEM flush (also gated by flush_r).
+    //
+    // Guard: capture any_correction only when flush_r=0 to prevent a wrong-path
+    // branch/JALR in EX during the correction cycle from re-triggering a flush.
     reg                   flush_r;
     reg [ADDR_WIDTH-1:0]  correction_target_r;
 
@@ -213,8 +217,9 @@ module core_top #(
             flush_r             <= 1'b0;
             correction_target_r <= {ADDR_WIDTH{1'b0}};
         end else if (!dcache_stall) begin
-            flush_r             <= any_correction;
-            correction_target_r <= correction_target;
+            flush_r             <= any_correction && !flush_r;
+            if (any_correction && !flush_r)
+                correction_target_r <= correction_target;
         end
         // During dcache_stall the whole pipeline is frozen; hold flush_r.
     end
@@ -262,7 +267,9 @@ module core_top #(
     // ── Branch Predictor ─────────────────────────────────────────────────────
     // Guard update with !dcache_stall: EX is frozen during D$ misses so we
     // must not update the predictor for the same branch multiple times.
-    wire bp_update_en = (ex_branch || ex_jal) && !dcache_stall;
+    // Guard with !flush_r: without id_ex_kill a wrong-path branch/jal may
+    // spend one cycle in EX; prevent it from corrupting the BHT/BTB.
+    wire bp_update_en = (ex_branch || ex_jal) && !dcache_stall && !flush_r;
 
     branch_predictor #(
         .ADDR_WIDTH  (ADDR_WIDTH),
@@ -541,7 +548,6 @@ module core_top #(
         .id_ex_rs1     (ex_rs1_addr),
         .id_ex_rs2     (ex_rs2_addr),
         .mispredicted  (flush_r),        // registered: drives if_id_flush / pc_stall (timing-safe)
-        .id_ex_kill    (any_correction), // combinational: kills ID/EX in cycle N only (short path to ID/EX CE)
         .ex_jalr       (1'b0),
         .icache_stall  (icache_stall),
         .dcache_stall  (dcache_stall),

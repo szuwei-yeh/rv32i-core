@@ -33,7 +33,6 @@ module hazard_unit (
     // Branch/jump redirect signals (from EX stage)
     input  wire        mispredicted, // registered any_correction (flush_r) → timing-safe, for IF/ID flush
     input  wire        ex_jalr,      // JALR always needs redirect (not predicted)
-    input  wire        id_ex_kill,   // combinational any_correction → kills ID/EX in cycle N (1 cycle early)
 
     // Cache stall inputs
     input  wire        icache_stall,   // I$ miss — stall IF
@@ -70,7 +69,10 @@ module hazard_unit (
 
     // During a branch redirect, allow PC to take the target even if I$ fill is active.
     // (if_id_reg gives flush priority over stall, so the flush will clear IF/ID correctly.)
-    assign pc_stall     = load_use_hazard || (icache_stall && !flush_pipeline) || dcache_stall;
+    // flush_pipeline overrides load_use/icache stalls on pc_stall: without this guard,
+    // a wrong-path load in EX (cycle N+1, after id_ex_kill removed) could hold the PC
+    // and prevent the correction target from being captured.
+    assign pc_stall     = ((load_use_hazard || icache_stall) && !flush_pipeline) || dcache_stall;
     assign if_id_stall  = load_use_hazard || icache_stall || dcache_stall;
 
     // IF/ID flush: redirect must clear IF/ID even during an I$ miss.
@@ -78,14 +80,13 @@ module hazard_unit (
     assign if_id_flush  = flush_pipeline && !load_use_hazard && !dcache_stall;
 
     // ID/EX flush: bubble on load-use / icache miss, or branch redirect.
-    // id_ex_kill = any_correction (combinational) fires in cycle N to prevent the
-    // instruction immediately after a mispredicted branch from reaching EX.
     // flush_pipeline (= flush_r, registered) fires in cycle N+1 to clean up the
-    // wrong-path instruction that entered IF/ID during the 1-cycle PC-redirect gap.
-    // Together they form a dual-cycle kill without touching IF/ID CE in cycle N
-    // (preserving the timing-safe flush_r → IF/ID CE path).
+    // wrong-path instruction in ID/EX.  The wrong-path instruction that entered EX
+    // in cycle N+1 is killed by the EX/MEM flush (also driven by flush_r), so no
+    // combinational any_correction → id_ex_flush path is needed.  This breaks the
+    // forwarding→ALU→branch→any_correction→id_ex_flush(fo=223) critical path.
     assign id_ex_flush  = (load_use_hazard || icache_stall) ||
-                          ((flush_pipeline || id_ex_kill) && !dcache_stall);
+                          (flush_pipeline && !dcache_stall);
 
     // D$-miss outputs: freeze entire pipeline up to and including MEM/WB.
     // MEM/WB is STALLED (not flushed) so the instruction in WB keeps its forwarding
