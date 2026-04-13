@@ -65,7 +65,7 @@ mkdir -p "$OUT_DIR"
 
 # ── Compile the testbench (once) ──────────────────────────────────────────
 echo "━━━ Compiling testbench ━━━"
-if ! iverilog -g2005 -o "$VVP" rtl/*.v tb/tb_riscv_tests.v 2>&1; then
+if ! iverilog -g2005 -s tb_riscv_tests -o "$VVP" rtl/*.v tb/tb_riscv_tests.v 2>&1; then
     echo "ERROR: testbench compilation failed" >&2
     exit 1
 fi

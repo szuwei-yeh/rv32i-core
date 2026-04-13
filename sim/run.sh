@@ -22,9 +22,10 @@ run_tb() {
     echo ""
     echo "━━━ $name ━━━"
 
-    # Compile
+    # Compile (use -s to explicitly name the top module so iverilog ignores
+    # synthesis-only top modules like axi_top that live in rtl/)
     local compile_log
-    if ! compile_log=$(iverilog -g2005 -o "sim/${name}.vvp" $RTL "$tb" 2>&1); then
+    if ! compile_log=$(iverilog -g2005 -s "$name" -o "sim/${name}.vvp" $RTL "$tb" 2>&1); then
         echo "$compile_log"
         echo "FAIL: $name — compilation error"
         SUMMARY+=("FAIL: $name (compile error)")

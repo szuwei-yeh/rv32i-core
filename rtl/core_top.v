@@ -7,14 +7,28 @@
 // L1 I$ and D$ added in front of imem/dmem.
 
 module core_top #(
-    parameter DATA_WIDTH = 32,
-    parameter ADDR_WIDTH = 32
+    parameter DATA_WIDTH  = 32,
+    parameter ADDR_WIDTH  = 32,
+    // Set to 1 to expose external backing-memory ports (used by axi_top).
+    // Default 0: internal imem/dmem are used; testbench hierarchy is unchanged.
+    parameter USE_EXT_MEM = 0
 )(
     input  wire        clk,
     input  wire        rst_n,
     output wire [31:0] debug_pc,      // IF-stage PC
     output wire [31:0] debug_wb_data, // WB-stage write-back value (prevents trim)
-    output wire        debug_reg_we   // WB-stage register write enable
+    output wire        debug_reg_we,  // WB-stage register write enable
+
+    // ── External backing-memory ports (meaningful only when USE_EXT_MEM=1) ──
+    // I$ backing store (read-only from core side)
+    output wire [ADDR_WIDTH-1:0] ext_imem_addr,
+    input  wire [DATA_WIDTH-1:0] ext_imem_rdata,
+    // D$ backing store
+    output wire [ADDR_WIDTH-1:0] ext_dmem_addr,
+    output wire                  ext_dmem_we,
+    output wire [2:0]            ext_dmem_funct3,
+    output wire [DATA_WIDTH-1:0] ext_dmem_wr_data,
+    input  wire [DATA_WIDTH-1:0] ext_dmem_rdata
 );
     // =========================================================
     // Wire declarations
@@ -151,14 +165,27 @@ module core_top #(
 
     // I$ ↔ imem wires
     wire [ADDR_WIDTH-1:0] icache_mem_addr;
-    wire [DATA_WIDTH-1:0] imem_instr_out;
+    wire [DATA_WIDTH-1:0] imem_instr_int;  // raw output of internal u_imem
+    wire [DATA_WIDTH-1:0] imem_instr_out;  // after USE_EXT_MEM mux → icache.mem_rdata
 
     // D$ ↔ dmem wires
     wire [ADDR_WIDTH-1:0] dcache_dmem_addr;
     wire                  dcache_dmem_we;
     wire [2:0]            dcache_dmem_funct3;
     wire [DATA_WIDTH-1:0] dcache_dmem_wr_data;
-    wire [DATA_WIDTH-1:0] dmem_rd_data;
+    wire [DATA_WIDTH-1:0] dmem_rd_data_int; // raw output of internal u_dmem
+    wire [DATA_WIDTH-1:0] dmem_rd_data;     // after USE_EXT_MEM mux → dcache.dmem_rd_data
+
+    // ── Memory source mux (compile-time constant) ───────────────────────────
+    assign imem_instr_out = (USE_EXT_MEM == 1) ? ext_imem_rdata : imem_instr_int;
+    assign dmem_rd_data   = (USE_EXT_MEM == 1) ? ext_dmem_rdata : dmem_rd_data_int;
+
+    // ── External port assignments (always driven; ignored when USE_EXT_MEM=0) ─
+    assign ext_imem_addr    = icache_mem_addr;
+    assign ext_dmem_addr    = dcache_dmem_addr;
+    assign ext_dmem_we      = dcache_dmem_we;
+    assign ext_dmem_funct3  = dcache_dmem_funct3;
+    assign ext_dmem_wr_data = dcache_dmem_wr_data;
 
     // =========================================================
     // IF Stage
@@ -258,10 +285,11 @@ module core_top #(
         .miss_count()
     );
 
-    // Backing instruction memory — address driven by I$ during fills
+    // Backing instruction memory — always instantiated (preserves dut.u_imem.mem
+    // for testbench $readmemh; muxed out when USE_EXT_MEM=1).
     imem #(.ADDR_WIDTH(ADDR_WIDTH), .DATA_WIDTH(DATA_WIDTH)) u_imem (
         .addr  (icache_mem_addr),
-        .instr (imem_instr_out)
+        .instr (imem_instr_int)
     );
 
     // ── Branch Predictor ─────────────────────────────────────────────────────
@@ -493,14 +521,15 @@ module core_top #(
         .miss_count    ()
     );
 
-    // Backing data memory — controlled entirely by D$ during misses
+    // Backing data memory — always instantiated (preserves dut.u_dmem.mem
+    // for testbench; writes disabled and output muxed out when USE_EXT_MEM=1).
     dmem #(.ADDR_WIDTH(ADDR_WIDTH), .DATA_WIDTH(DATA_WIDTH)) u_dmem (
         .clk      (clk),
-        .mem_we   (dcache_dmem_we),
+        .mem_we   ((USE_EXT_MEM == 1) ? 1'b0 : dcache_dmem_we),
         .funct3   (dcache_dmem_funct3),
         .addr     (dcache_dmem_addr),
         .wr_data  (dcache_dmem_wr_data),
-        .rd_data  (dmem_rd_data)
+        .rd_data  (dmem_rd_data_int)
     );
 
     // =========================================================
