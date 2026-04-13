@@ -158,7 +158,7 @@ for name in "${TESTS[@]}"; do
     esac
 done
 
-# ── Summary ───────────────────────────────────────────────────────────────
+# ── Summary: riscv-tests ──────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " riscv-tests rv32ui-p results"
@@ -174,8 +174,77 @@ if [ "$total_instrs" -gt 0 ]; then
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-if [ "$FAIL" -eq 0 ]; then
-    echo "  ALL PASS ($PASS/$TOTAL)"
+ISA_FAIL=$FAIL
+
+# ── Corner-case tests ─────────────────────────────────────────────────────
+# Same toolchain / linker / testbench as rv32ui-p; sources live in tests/corner/.
+CORNER_DIR="tests/corner"
+CORNER_PASS=0
+CORNER_FAIL=0
+CORNER_SKIP=0
+declare -a CORNER_RESULTS=()
+
+if [ -d "$CORNER_DIR" ] && [ "${#SELECTED[@]}" -eq 0 ]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Corner-case hazard tests"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    for src in "$CORNER_DIR"/*.S; do
+        [ -f "$src" ] || continue
+        name=$(basename "$src" .S)
+        elf="$OUT_DIR/corner_${name}.elf"
+        hex="$OUT_DIR/corner_${name}.hex"
+
+        compile_err=0
+        compile_log=$($CC $CFLAGS -o "$elf" "$src" 2>&1) || compile_err=$?
+        if [ $compile_err -ne 0 ]; then
+            echo "FAIL  corner/$name  (compile error)"
+            echo "      $compile_log"
+            CORNER_RESULTS+=("FAIL  corner/$name  [compile error]")
+            CORNER_FAIL=$((CORNER_FAIL + 1))
+            continue
+        fi
+
+        python3 "$SCRIPT" "$elf" "$hex" 4096
+        cp "$hex" sim/test.hex
+
+        result=$(vvp "$VVP" "+TEST=corner/$name" "${VVP_ARGS[@]+"${VVP_ARGS[@]}"}" 2>&1)
+        echo "$result"
+
+        verdict=$(echo "$result" | grep -E '^(PASS|FAIL|TIMEOUT)' | head -1 | awk '{print $1}')
+        [ -z "$verdict" ] && verdict="UNKNOWN"
+
+        case "$verdict" in
+            PASS)
+                CORNER_RESULTS+=("PASS  corner/$name")
+                CORNER_PASS=$((CORNER_PASS + 1))
+                ;;
+            FAIL)
+                CORNER_RESULTS+=("FAIL  corner/$name")
+                CORNER_FAIL=$((CORNER_FAIL + 1))
+                ;;
+            TIMEOUT)
+                CORNER_RESULTS+=("TIMEOUT  corner/$name")
+                CORNER_FAIL=$((CORNER_FAIL + 1))
+                ;;
+            *)
+                CORNER_RESULTS+=("FAIL  corner/$name  [no verdict]")
+                CORNER_FAIL=$((CORNER_FAIL + 1))
+                ;;
+        esac
+    done
+
+    CORNER_TOTAL=$((CORNER_PASS + CORNER_FAIL + CORNER_SKIP))
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    for r in "${CORNER_RESULTS[@]}"; do echo "  $r"; done
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  PASS: $CORNER_PASS / $CORNER_TOTAL   FAIL: $CORNER_FAIL"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+fi
+
+if [ "$ISA_FAIL" -eq 0 ] && [ "$CORNER_FAIL" -eq 0 ]; then
+    echo "  ALL PASS"
     exit 0
 else
     exit 1
